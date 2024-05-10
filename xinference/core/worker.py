@@ -361,8 +361,6 @@ class WorkerActor(xo.StatelessActor):
         allocated_devices = set(self._gpu_to_model_uid.keys()).union(
             user_specified_allocated_devices
         )
-        if n_gpu > len(self._total_gpu_devices) - len(allocated_devices):
-            raise RuntimeError("No available slot found for the model")
 
         devices: List[int] = [
             dev
