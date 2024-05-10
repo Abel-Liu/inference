@@ -1,23 +1,35 @@
-name: Xinference CD for DockerHub
+name: Push docker image
 
 on:
-  schedule:
-    - cron: '0 18 * * *'
-  push:
-    tags:
-      - '*'
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to run'
+        type: environment
+        required: true
+
+env:
+  BASE_VERSION: v0.10.3
+
+permissions:
+  id-token: write   # This is required for requesting the JWT
+  contents: read    # This is required for actions/checkout
+  actions: read     # for read job status
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+run-name: Push to [${{ inputs.environment }}] branch [${{ github.ref_name }}]
+
 jobs:
   build:
-    runs-on: self-hosted
+    runs-on: [ 'ubuntu-latest' ]
+    environment: ${{ inputs.environment }}
+
     strategy:
       matrix:
-        python-version: [ "3.9" ]
+        python-version: [ "3.10" ]
     steps:
       - name: Check out code
         uses: actions/checkout@v3
@@ -25,47 +37,37 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v1
+      - name: Configure AWS Credentials
+        id: configure-aws
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+          aws-region: cn-north-1
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: get caller identity2
+        run: |
+          aws sts get-caller-identity
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+  
+      - run: | 
+          echo "GIT_TAG=${{ env.BASE_VERSION }}_${{ github.run_number }}" >> $GITHUB_ENV
+
+      - name: print
+        run: |
+          echo "GIT_TAG: ${{ env.GIT_TAG }}"
 
       - name: Build and push Docker image
         shell: bash
-        if: ${{ github.repository == 'xorbitsai/inference' }}
         env:
-          DOCKER_ORG: ${{ secrets.DOCKERHUB_USERNAME }}
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           PY_VERSION: ${{ matrix.python-version }}
         run: |
-          if [[ "$GITHUB_REF" =~ ^"refs/tags/" ]]; then
-            export GIT_TAG=$(echo "$GITHUB_REF" | sed -e "s/refs\/tags\///g")
-          fi
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
           
-          if [[ -n "$GIT_TAG" ]]; then
-            BRANCHES="$GIT_TAG"
-            echo "Will handle tag $BRANCHES"
-          else
-            MAINBRANCH=$(git rev-parse --abbrev-ref HEAD)
-            BRANCHES="$MAINBRANCH"
-          fi
-          
-          for branch in $BRANCHES; do
-            if [[ -n "$GIT_TAG" ]]; then
-              export IMAGE_TAG="$GIT_TAG"
-            else
-              git checkout $branch
-              export IMAGE_TAG="nightly-$branch"
-            fi
-            docker build -t "$DOCKER_ORG/xinference:${IMAGE_TAG}" --progress=plain -f xinference/deploy/docker/Dockerfile .
-            docker push "$DOCKER_ORG/xinference:${IMAGE_TAG}"
-            docker build -t "$DOCKER_ORG/xinference:${IMAGE_TAG}-cpu" --progress=plain -f xinference/deploy/docker/cpu.Dockerfile .
-            docker push "$DOCKER_ORG/xinference:${IMAGE_TAG}-cpu"
-          done
-          
-          if [[ -n "$GIT_TAG" ]]; then
-            docker tag "$DOCKER_ORG/xinference:${GIT_TAG}" "$DOCKER_ORG/xinference:latest"
-            docker push "$DOCKER_ORG/xinference:latest"
-            docker tag "$DOCKER_ORG/xinference:${GIT_TAG}-cpu" "$DOCKER_ORG/xinference:latest-cpu"
-            docker push "$DOCKER_ORG/xinference:latest-cpu"
-          fi
+          docker build -t $REGISTRY/xprobe/xinference:$GIT_TAG --progress=plain -f xinference/deploy/docker/Dockerfile .
+          docker push $REGISTRY/xprobe/xinference:$GIT_TAG
